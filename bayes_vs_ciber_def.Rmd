@@ -1,0 +1,437 @@
+---
+title: "Comparación de los resultados de CIBERSORTx y Bayesprism"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	fig.show = "hide",
+	message = FALSE,
+	warning = FALSE,
+	results = "hide")
+```
+
+1. Cargar paquetes necesarios
+```{r}
+library(tidyverse)
+library(dbplyr)
+library(SummarizedExperiment)
+library(ggpubr)
+library(rstatix)
+library(ggpubr)
+library(patchwork)
+```
+
+2. Cargar y preparar los archivos
+```{r}
+# -------- BAYESPRISM ---------
+
+bayesprism <- readRDS("BP_resultados2.RDS")
+ivygap <- readRDS ("IVYGAP.RDA")
+samples_df <- colData(ivygap) %>% 
+  as.data.frame() %>% 
+  dplyr::select(Sample, Tumor, Structure, SubtypeW) 
+
+#Convertir los datos a formato largo
+
+bayesprism <- bayesprism %>% 
+  rownames_to_column(var = "muestra")
+
+bayesprism_lf <- bayesprism %>%
+  pivot_longer(cols = -muestra, names_to = "tipo_celular", values_to = "proporcion")
+
+#Hay que unir los metadatos de ivygap y los resultados de la deconvolución a 
+#través de las columnas muestra y samples (columnas en común) 
+
+#Hay que asegurarse de que tengan el mismo formato antes de hacer el join:
+samples_df$Sample <- as.character(samples_df$Sample)
+bayesprism_lf$muestra <- as.character(bayesprism_lf$muestra) 
+
+bayesprism_lf_w_structure <- bayesprism_lf %>%
+  left_join(samples_df,
+    by = c("muestra" = "Sample"))
+
+# ------ CIBERSORTX -------
+
+#Quitar P-Value, Correlation y RMSE para que no se grafiquen como tipos celulares
+resultado_cibersort <- read_tsv("deconvolución_IVY_CPM_cibersort.txt", col_names = T)
+resultado_cibersort <- resultado_cibersort[, !names(resultado_cibersort) 
+                                           %in% c("P-value", "Correlation", "RMSE")]
+
+#Convertir los datos al formato largo
+cibersort_lf <- resultado_cibersort %>%
+  pivot_longer(cols = -1, names_to = "tipo_celular", values_to = "proporcion")
+
+#Unir a los metadatos de ivygap
+colData(ivygap) -> samples
+colnames(samples)
+
+cibersort_lf %>% mutate(Mixture = factor(Mixture)) %>% 
+  left_join(samples %>% as.data.frame %>% 
+              dplyr::select(Sample, Tumor, Structure, SubtypeW) %>%
+              mutate(Sample = factor(Sample)),
+            by = c(Mixture = "Sample")) -> cibersort_lf_w_structure
+
+if ("Mixture" %in% colnames(cibersort_lf_w_structure)) {
+  cibersort_lf_w_structure <- cibersort_lf_w_structure %>%
+    dplyr::rename(muestra = Mixture)}
+```
+
+Tenemos 2 data frames con los que trabajar: 
+cibersort_lf_w_structure y bayesprism_lf_w_structure
+
+3. Combinar data frames
+```{r}
+if ("proporcion" %in% colnames(cibersort_lf_w_structure)) {
+  cibersort_lf_w_structure <- cibersort_lf_w_structure %>%
+    dplyr::rename(proporcion_cibersort = proporcion) }
+  
+cibersort_lf_w_structure <- cibersort_lf_w_structure %>%
+  mutate(muestra = as.character(muestra),
+         Structure = as.factor(Structure))
+
+if ("proporcion" %in% colnames(bayesprism_lf_w_structure)) {
+  bayesprism_lf_w_structure <- bayesprism_lf_w_structure %>%
+    dplyr::rename(proporcion_bayesprism = proporcion)}
+
+bayesprism_lf_w_structure <- bayesprism_lf_w_structure %>%
+  mutate(muestra = as.character(muestra),
+         Structure = as.factor(Structure))
+```
+
+4. Gráficos de células neoplásicas
+```{r}
+# Tipos celulares neoplásicos seleccionados en orden alfabético
+tipos_seleccionados <- sort(c("AClike", "OPClike", "MES1like", "MES2like", 
+                              "NPC1like", "NPC2like"))
+
+# Unir los datos y filtrar por tipo celular
+comparacion_con_estructura_pearson <- inner_join(cibersort_lf_w_structure,
+                                                 bayesprism_lf_w_structure,
+                                                 by = c("muestra", "tipo_celular",
+                                                        "Structure", "SubtypeW")) %>% 
+
+  filter(tipo_celular %in% tipos_seleccionados) %>% 
+  mutate(tipo_celular = factor(tipo_celular, levels = tipos_seleccionados)) #ordena tipo_celular
+
+# Calcular correlaciones de Pearson por estructura y tipo celular
+correlaciones_estructura_pearson <- comparacion_con_estructura_pearson %>%
+  group_by(Structure, tipo_celular) %>%
+  summarise(cor_pearson = cor(proporcion_cibersort, proporcion_bayesprism, 
+                              method = "pearson"),
+    .groups = "drop") %>%
+  mutate(tipo_celular = factor(tipo_celular, levels = tipos_seleccionados))
+
+# ----- Gráfico de dispersión ---------
+p <- ggplot(comparacion_con_estructura_pearson,
+       aes(x = proporcion_cibersort, y = proporcion_bayesprism, color = Structure)) +
+  geom_point(alpha = 0.6, size = 1.5) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
+  facet_grid(Structure ~ tipo_celular, scales = "free") +
+  geom_text(data = correlaciones_estructura_pearson,
+            aes(x = Inf, y = -Inf,
+                label = paste0("r = ", round(cor_pearson, 2))),
+            hjust = 1.1, vjust = -0.5,
+            inherit.aes = FALSE,
+            size = 3, color = "blue") +
+  labs(x = "Proporción CIBERSORTx",
+       y = "Proporción BayesPrism",
+       title = "Correlación de Pearson entre BayesPrism y CIBERSORTx",
+       subtitle = "Células neoplásicas") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.position = "bottom") 
+ggsave(
+  filename = "celulasneoplasicas.png",
+  plot = p,
+  path = "C:/Users/usuario/Documents/1. Practicas/resultados",
+  width = 13, height = 6, dpi = 300,
+  bg = "white")
+
+print(p)
+
+#------ Heatmap  --------
+
+#Ordenar eje Y
+correlaciones_estructura_pearson$Structure <- factor(
+  correlaciones_estructura_pearson$Structure,
+  levels = c("CT", "CTmvp", "CTpan", "IT", "LE"))
+
+levels(correlaciones_estructura_pearson$Structure)
+
+o <- ggplot(correlaciones_estructura_pearson, aes(x = tipo_celular, 
+                                                  y = Structure, fill = cor_pearson)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(cor_pearson, 2),
+                color = cor_pearson < 0.5)) +
+  scale_color_manual(values = c("TRUE" = "black", "FALSE" = "white"), guide = "none") +
+  scale_fill_gradient2(low = "white", mid = "#a6c8ff", high = "#08306b", midpoint = 0.5,
+                       limits = c(0, 1), oob = scales::squish, na.value = "grey90") +
+  scale_y_discrete(limits = rev(levels(correlaciones_estructura_pearson$Structure))) +
+  labs(title = "Correlación de Pearson entre CIBERSORTx y BayesPrism",
+       subtitle = "Células neoplásicas",
+       x = "Tipo celular",
+       y = "Estructura",
+       fill = "Pearson r") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+
+print(o)
+
+```
+
+5. Fusionar células neoplásicas
+```{r}
+# Definir cuáles son las células neoplásicas
+tipos_tumor <- c("AClike", "OPClike", "MES1like", "MES2like", "NPC1like", "NPC2like")
+
+# ------ CIBERSORTX -------
+
+ciber_grouped <- cibersort_lf_w_structure %>%
+  mutate(
+    muestra = as.character(muestra),
+    Structure = as.factor(Structure),
+    grupo_celular = ifelse(tipo_celular %in% tipos_tumor, "Tumor", tipo_celular)
+  ) %>%
+  group_by(muestra, Structure, grupo_celular, SubtypeW) %>%
+  summarise(proporcion_cibersort = sum(proporcion_cibersort), .groups = "drop")
+
+# ------- BAYESPRISM --------
+bayes_grouped <- bayesprism_lf_w_structure %>%
+  mutate(
+    muestra = as.character(muestra),
+    Structure = as.factor(Structure),
+    grupo_celular = ifelse(tipo_celular %in% tipos_tumor, "Tumor", tipo_celular)
+  ) %>%
+  group_by(muestra, Structure, grupo_celular, SubtypeW) %>%
+  summarise(proporcion_bayesprism = sum(proporcion_bayesprism), .groups = "drop")
+
+# Unir los datos por muestra, estructura, grupo celular y subtipo
+comparacion_grupo <- inner_join(ciber_grouped, bayes_grouped,
+                                by = c("muestra", "Structure", 
+                                       "grupo_celular", "SubtypeW"))
+
+```
+
+5. Gráfico de microambiente tumoral
+```{r}
+# Calcular correlaciones de Pearson por estructura y grupo celular
+correlaciones_grupo <- comparacion_grupo %>%
+  group_by(Structure, grupo_celular) %>%
+  summarise(cor_pearson = cor(proporcion_cibersort, proporcion_bayesprism, 
+                              method = "pearson"),
+    .groups = "drop")
+
+# ------- Gráfico de dispersión --------
+p <- ggplot(comparacion_grupo,
+       aes(x = proporcion_cibersort, y = proporcion_bayesprism, color = Structure)) +
+  geom_point(alpha = 0.6, size = 1.5) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
+  facet_grid(Structure ~ grupo_celular, scales = "free") +
+  geom_text(data = correlaciones_grupo,
+            aes(x = Inf, y = -Inf, label = paste0("r = ", round(cor_pearson, 2))),
+            hjust = 1.1, vjust = -0.5,
+            inherit.aes = FALSE,
+            size = 3, color = "blue") +
+  labs(x = "Proporción CIBERSORTx",
+       y = "Proporción BayesPrism",
+       title = "Correlación de Pearson entre BayesPrism y CIBERSORTx",
+       subtitle = "Microambiente tumoral") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.position = "bottom")
+
+ggsave(
+  filename = "microambiente2.png",
+  plot = p,
+  path = "C:/Users/usuario/Documents/1. Practicas/resultados",
+  width = 13, height = 6, dpi = 300,
+  bg = "white")
+
+print(p)
+
+# ----- Heatmap -------
+correlaciones_grupo$Structure <- factor(
+  as.character(correlaciones_grupo$Structure),
+  levels = c("CT", "CTmvp", "CTpan", "IT", "LE"))
+
+ggplot(correlaciones_grupo, aes(x = grupo_celular, y = Structure, fill = cor_pearson)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(cor_pearson, 2)), size = 3,
+            color = ifelse(correlaciones_grupo$cor_pearson > 0.6, "white", "black")) +
+  scale_fill_gradient2(low = "white", mid = "#a6c8ff", high = "#08306b", midpoint = 0.5,
+                       limits = c(0, 1), oob = scales::squish, na.value = "grey90") +
+  scale_y_discrete(limits = rev(levels(correlaciones_grupo$Structure))) +
+  labs(title = "Correlación de Pearson entre CIBERSORTx y BayesPrism",
+       subtitle = "Microambiente tumoral",
+       x = "Grupo celular",
+       y = "Estructura",
+       fill = "Pearson r") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5))
+
+```
+
+6. Comparación por zona
+```{r}
+#Asegurar que la columna 'metodo' existe
+if (!"metodo" %in% names(bayesprism_lf_w_structure)) {
+  bayesprism_lf_w_structure$metodo <- "BayesPrism"}
+if (!"metodo" %in% names(cibersort_lf_w_structure)) {
+  cibersort_lf_w_structure$metodo <- "CIBERSORTx"}
+
+#Renombrar columnas si es necesario
+if ("proporcion_cibersort" %in% names(cibersort_lf_w_structure)) {
+  cibersort_lf_w_structure <- cibersort_lf_w_structure %>%
+    dplyr::rename(proporcion_comparativa = proporcion_cibersort)}
+if ("proporcion_bayesprism" %in% names(bayesprism_lf_w_structure)) {
+  bayesprism_lf_w_structure <- bayesprism_lf_w_structure %>%
+    dplyr::rename(proporcion_comparativa = proporcion_bayesprism)}
+
+#Combinar dataframes
+datos_combinados <- bind_rows(bayesprism_lf_w_structure, cibersort_lf_w_structure)
+
+#Crear una variable combinada del método (Bayesprism o Cibersort) y el subtipo
+datos_combinados <- datos_combinados %>%
+  mutate(metodo_subtype = paste(metodo, SubtypeW, sep = "_"))
+
+#Asignación de colores
+colores_puntos <- c(
+  "BayesPrism_Classical" = "#1f77b4",
+  "BayesPrism_Mesenchymal" = "#2ca02c",
+  "BayesPrism_Proneural" = "#ff7f0e",
+  "CIBERSORTx_Classical" = "#1f77b4",
+  "CIBERSORTx_Mesenchymal" = "#2ca02c",
+  "CIBERSORTx_Proneural" = "#ff7f0e")
+
+#Bucle
+for (structure in unique(datos_combinados$Structure)) {
+  
+  datos_filtrados <- datos_combinados %>%
+    filter(Structure == structure)
+  
+  #Wilcoxon test 
+  test_resultados <- datos_filtrados %>%
+    group_by(tipo_celular) %>%
+    wilcox_test(proporcion_comparativa ~ metodo, p.adjust.method = "BH") %>%
+    add_significance() %>%
+    add_xy_position(x = "tipo_celular", dodge = 0.8)
+  
+  #Gráficos
+  grafico <- ggplot(datos_filtrados, aes(x = tipo_celular, 
+                                         y = proporcion_comparativa)) +
+    geom_boxplot(aes(fill = metodo), position = position_dodge(width = 0.8),
+                 outlier.shape = NA, alpha = 0.5) +
+    geom_jitter(aes(color = metodo_subtype, group = metodo),
+                position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+                alpha = 0.5, size = 1) +
+    stat_pvalue_manual(test_resultados, hide.ns = TRUE, 
+                       tip.length = 0.01, label = "p.signif") +
+    labs(title = paste(structure),
+         y = "Proporción celular",
+         x = "Tipo celular",
+         fill = "Método",
+         color = "Subtipo tumoral") +
+    theme_light() +
+    scale_fill_manual(values = c("BayesPrism" = "#1f77b4", 
+                                 "CIBERSORTx" = "#ff7f0e")) +
+    scale_color_manual(
+      values = colores_puntos,
+      breaks = c("BayesPrism_Classical", "BayesPrism_Mesenchymal", 
+                 "BayesPrism_Proneural"),
+      labels = c("Classical", "Mesenchymal", "Proneural")) +
+    guides(fill = guide_legend(order = 1),
+           color = guide_legend(order = 2)) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  print(grafico)
+  
+}
+
+```
+7. Agrupar las células neoplásicas como "Tumor" para ver su proporción total
+```{r}
+
+#Asegurar columna 'metodo'
+if (!"metodo" %in% names(bayes_grouped)) {
+  bayes_grouped$metodo <- "BayesPrism"
+}
+if (!"metodo" %in% names(ciber_grouped)) {
+  ciber_grouped$metodo <- "CIBERSORTx"
+}
+
+#Renombrar columnas si es necesario
+if ("proporcion_bayesprism" %in% names(bayes_grouped)) {
+  names(bayes_grouped)[
+    names(bayes_grouped) == "proporcion_bayesprism"] <- "proporcion_comparativa"
+}
+
+if ("proporcion_cibersort" %in% names(ciber_grouped)) {
+  names(ciber_grouped)[
+    names(ciber_grouped) == "proporcion_cibersort"] <- "proporcion_comparativa"
+}
+#Combinar data frames
+datos_combinados <- bind_rows(bayes_grouped, ciber_grouped)
+
+#Crear variable que combina método y subtype para colorear puntos
+datos_combinados <- datos_combinados %>%
+  mutate(metodo_subtype = paste(metodo, SubtypeW, sep = "_"))
+
+#Asignar colores
+colores_puntos <- c("BayesPrism_Classical" = "#1f77b4",
+                    "BayesPrism_Mesenchymal" = "#2ca02c",
+                    "BayesPrism_Proneural" = "#ff7f0e",
+                    "CIBERSORTx_Classical" = "#1f77b4",
+                    "CIBERSORTx_Mesenchymal" = "#2ca02c",
+                    "CIBERSORTx_Proneural" = "#ff7f0e")
+
+for (cell in unique(datos_combinados$grupo_celular)) {
+  
+  datos_filtrados <- datos_combinados %>%
+    filter(grupo_celular == cell)
+  
+  #Wilcoxon test
+  test_resultados <- datos_filtrados %>%
+    group_by(Structure) %>%
+    wilcox_test(proporcion_comparativa ~ metodo, p.adjust.method = "BH") %>%
+    add_significance() %>%
+    add_xy_position(x = "Structure", dodge = 0.8)
+  
+  #Gráfico
+grafico <- ggplot(datos_filtrados, aes(x = Structure, y = proporcion_comparativa)) +
+  geom_boxplot(aes(fill = metodo), position = position_dodge(width = 0.8),
+               outlier.shape = NA, alpha = 0.5) +
+  geom_jitter(aes(color = metodo_subtype, group = metodo),
+              position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+              alpha = 0.7, size = 2) +
+  stat_pvalue_manual(test_resultados, hide.ns = TRUE, tip.length = 0.01, label = "p.signif") +
+  labs(title = paste(cell),
+       y = "Proporción celular",
+       x = "Estructura histológica",
+       fill = "Método",
+       color = "Subtipo tumoral") +
+  theme_light() +
+  scale_fill_manual(values = c("BayesPrism" = "#1f77b4", "CIBERSORTx" = "#ff7f0e")) +
+  scale_color_manual(
+    values = colores_puntos,
+    breaks = c("BayesPrism_Classical", "BayesPrism_Mesenchymal", 
+               "BayesPrism_Proneural"),
+    labels = c("Classical", "Mesenchymal", "Proneural")) +
+  guides(fill = guide_legend(order = 1),
+         color = guide_legend(order = 2)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  print(grafico)
+  grafico
+}
+```
