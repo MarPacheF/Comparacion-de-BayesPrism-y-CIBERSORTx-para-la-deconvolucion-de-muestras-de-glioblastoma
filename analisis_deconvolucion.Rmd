@@ -1,0 +1,242 @@
+---
+title: "Análisis de resultados de deconvolución"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    keep_tex: true
+    toc: false
+mainfont: Arial
+fontsize: 11pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	fig.show = "hide",
+	message = FALSE,
+	warning = FALSE,
+	results = "hide")
+```
+
+Cargar paquetes y datos
+```{r}
+library(tidyverse)
+library(dbplyr)
+library(SummarizedExperiment)
+library(ggpubr)
+library(rstatix)
+library(ggpubr)
+library(patchwork)
+```
+
+#Comprobación de que ambos resultados están en proporciones relativas
+```{r}
+# ----- BAYESPRISM -------
+
+bayesprism <- readRDS("BP_resultados2.RDS")
+row_sums <- rowSums(bayesprism)
+head(row_sums)
+
+# ---- CIBERSORTX --------
+cibersort <- read_tsv("deconvolución_IVY_CPM_cibersort.txt", col_names = T)
+
+cibersort <- cibersort %>%
+  dplyr::select(-RMSE, -Correlation, -`P-value`)
+subset_cibersort <- cibersort[-1, -1]
+ciber_sum <- rowSums(subset_cibersort)
+head(ciber_sum)
+```
+
+
+```{r}
+# ----- BAYESPRISM -------
+
+bayesprism <- readRDS("BP_resultados2.RDS")
+ivygap <- readRDS ("IVYGAP.RDA")
+
+#Convertir los datos a formato largo
+
+bayesprism <- bayesprism %>% 
+  rownames_to_column(var = "muestra")
+
+bayesprism_lf <- bayesprism %>%
+  pivot_longer(cols = -muestra, names_to = "tipo_celular", 
+               values_to = "proporcion")
+
+#Hay que unir los datos de ivygap y los resultados de la deconvolución a
+#través de las columnas muestra y samples (columnas en común) para obtener la 
+#estructura de las muestras
+
+samples_df <- colData(ivygap) %>% 
+  as.data.frame() %>% 
+  dplyr::select(Sample, Tumor, Structure) 
+#Extrae los metadatos de las muestras de ivygap y los guarda en la variable 
+#samples como un df
+
+samples_df$Sample <- as.character(samples_df$Sample)
+bayesprism_lf$muestra <- as.character(bayesprism_lf$muestra)
+
+bayesprism_lf_w_structure <- bayesprism_lf %>%
+  left_join(
+    samples_df,
+    by = c("muestra" = "Sample"))
+
+# ------- CIBERSORTX -------
+
+resultado_cibersort <- read_tsv("deconvolución_IVY_CPM_cibersort.txt", col_names = T)
+
+#Quitar P-Value, Correlation y RMSE para que no se grafiquen como tipos celulares
+resultado_cibersort <- resultado_cibersort[, !names(resultado_cibersort) %in% 
+                                             c("P-value", "Correlation", "RMSE")]
+
+#Convertir los datos al formato largo
+cibersort_lf <- resultado_cibersort %>%
+  pivot_longer(cols = -1, names_to = "tipo_celular", values_to = "proporcion")
+
+#Unir a las estructuras de ivygap
+colData(ivygap) -> samples
+colnames(samples)
+
+cibersort_lf %>% mutate(Mixture = factor(Mixture)) %>% 
+  left_join(samples %>% as.data.frame %>% 
+              dplyr::select(Sample, Tumor, Structure) %>%
+              mutate(Sample = factor(Sample)),
+            by = c(Mixture = "Sample")) -> cibersort_lf_w_structure
+
+head(cibersort_lf_w_structure)
+cibersort_lf_w_structure <- cibersort_lf_w_structure %>%
+  dplyr::rename(muestra = Mixture)
+
+```
+
+
+Grafico de células neoplásicas
+```{r}
+#Cargar resultados de CIBERSORTx o Bayesprism. 
+#Tienen que contener la estructura.
+datos <- cibersort_lf_w_structure 
+
+#Definir las células neoplásicas a graficar:
+tipos_a_graficar <- c("AClike", "MES1like", "MES2like", 
+                      "NPC1like", "NPC2like", "OPClike")
+
+#Lista para guardar todos los gráficos individualmente
+lista_graficos <- list()
+
+#Bucle para generar cada gráfico y guardarlo en la lista
+for(cell in unique(datos$tipo_celular[datos$tipo_celular %in% tipos_a_graficar])){
+  datos %>%
+    filter(tipo_celular == cell) %>%
+    wilcox_test(proporcion ~ Structure, p.adjust.method = "BH") -> res
+  
+  res %>% filter(p.adj.signif != "ns") %>%
+    add_xy_position(group = "Structure") -> res
+  
+  p <- datos %>%
+    filter(tipo_celular == cell) %>%
+    ggplot(aes(y = proporcion, x = Structure)) +
+    geom_boxplot(fill = NA, outlier.shape = NA) +
+    geom_jitter(aes(color = Structure), alpha = 0.5, width = .25) +
+    stat_pvalue_manual(res, hide.ns = TRUE) +
+    labs(title = paste(cell),
+         y = "Proporción",
+         x = "Estructura Histológica") +
+    theme_light() +
+    guides(color = guide_legend(title = NULL))
+
+  # Añadir el gráfico a la lista
+  lista_graficos[[cell]] <- p
+}
+
+#Ordenar los gráficos por orden alfabético
+lista_graficos <- lista_graficos[order(names(lista_graficos))]
+
+#Combinar todos los gráficos en una sola figura con patchwork
+figura_completa <- wrap_plots(lista_graficos, ncol = 3) +
+  plot_annotation(
+    title = "Células neoplásicas (CIBERSORTx)", #Modificar el nombre según el archivo 
+    theme = theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5))) &
+   theme(legend.position = "none")
+
+#Modificar la ruta donde guardar segun el archivo utilizado
+ggsave(
+  filename = file.path(
+    "C:/Users/usuario/Documents/1. Practicas/resultados/resultados_deconvolución",
+    "tipos_neoplásicos_cibersort.png"),
+  plot = figura_completa,
+  width = 10,
+  height = 6
+)
+
+print(figura_completa)
+```
+
+Gráficos del microambiente
+```{r}
+#Cargar los resultados de bayesprism o cibersort. Deben tener la estructura. 
+datos <- cibersort_lf_w_structure 
+
+tipos_tumor <- c("AClike", "MES1like", "MES2like", "NPC1like", "NPC2like", "OPClike")
+
+datos_grouped <- datos %>%
+  mutate(
+    muestra = as.character(muestra),
+    Structure = as.factor(Structure),
+    grupo_celular = ifelse(tipo_celular %in% 
+                             tipos_tumor, "Tumor", tipo_celular) %>% as.character()
+  ) %>%
+  group_by(muestra, Structure, grupo_celular) %>%
+  summarise(proporcion = sum(proporcion), .groups = "drop")
+
+lista_graficos <- list()
+
+for (cell in unique(datos_grouped$grupo_celular)) {
+  df_cell <- datos_grouped %>% filter(grupo_celular == cell)
+
+  # Test estadístico
+  res <- df_cell %>%
+    wilcox_test(proporcion ~ Structure, p.adjust.method = "BH")
+
+  # Filtrar significativos
+  res_sig <- res %>%
+    filter(p.adj.signif != "ns") %>%
+    add_xy_position(group = "Structure")
+
+  # Gráfico
+  p <- df_cell %>%
+    ggplot(aes(y = proporcion, x = Structure)) +
+    geom_boxplot(fill = NA, outlier.shape = NA) +
+    geom_jitter(aes(color = Structure), alpha = 0.5, width = .25) +
+    stat_pvalue_manual(res_sig, hide.ns = TRUE) +
+    labs(title = cell,
+         y = "Proporción",
+         x = "Estructura Histológica") +
+    theme_light() +
+    guides(color = guide_legend(title = NULL)) +
+    theme(legend.position = "none")
+
+  lista_graficos[[cell]] <- p
+}
+
+# Ordenar y combinar
+lista_graficos <- lista_graficos[order(names(lista_graficos))]
+
+figura_completa <- wrap_plots(lista_graficos, ncol = 3) +
+  plot_annotation(
+    title = "Microambiente tumoral (CIBERSORTx)", #Modificar nombre segun archivo
+    theme = theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5))
+  )
+
+#modificar ruta donde guardar segun archivo 
+ggsave(
+  filename = file.path(
+    "C:/Users/usuario/Documents/1. Practicas/resultados/resultados_deconvolución",
+    "microambiente_cibersort2.png"),
+  plot = figura_completa,
+  width = 10,
+  height = 6
+)
+
+print(figura_completa)
+```
+
