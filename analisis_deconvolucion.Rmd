@@ -1,12 +1,8 @@
 ---
 title: "Análisis de resultados de deconvolución"
 output:
-  pdf_document:
-    latex_engine: xelatex
-    keep_tex: true
-    toc: false
-mainfont: Arial
-fontsize: 11pt
+  pdf_document: default
+  html_notebook: default
 ---
 
 ```{r setup, include=FALSE}
